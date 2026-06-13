@@ -18,3 +18,5 @@ venv/
 # 临时文件
 *.tmp
 *.log
+debug_llm_output.log
+debug_review_output.log

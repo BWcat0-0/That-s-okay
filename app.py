@@ -4,7 +4,7 @@
 """
 
 import streamlit as st
-from services.llm import get_smoker_reply
+from services.llm import get_smoker_reply, select_personality
 from services.review import get_review
 
 # ============================================================
@@ -26,6 +26,8 @@ def init_session():
         "messages": [],
         "round_number": 1,
         "review": None,
+        "smoker_personality": None,
+        "_redirect_ready": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -38,6 +40,8 @@ def reset_training():
     st.session_state.messages = []
     st.session_state.round_number = 1
     st.session_state.review = None
+    st.session_state.smoker_personality = None
+    st.session_state._redirect_ready = False
 
 
 MAX_ROUNDS = 5
@@ -151,6 +155,7 @@ def render_home():
             st.session_state.messages = []
             st.session_state.round_number = 1
             st.session_state.review = None
+            st.session_state.smoker_personality = select_personality()
             st.rerun()
 
 
@@ -158,11 +163,20 @@ def render_home():
 # 页面：训练页
 # ============================================================
 def render_training():
-    # 顶部提示
-    st.markdown(
-        '<div class="training-hint">🎯 你正在练习：在餐厅/高铁制止他人抽烟</div>',
-        unsafe_allow_html=True,
-    )
+    # 顶部提示（含人格信息）
+    personality = st.session_state.smoker_personality or {}
+    personality_name = personality.get("name", "路人")
+    personality_avatar = personality.get("avatar", "🚬")
+    personality_hook = personality.get("opening_hook", "")
+
+    st.markdown(f"""
+    <div class="training-hint">
+        🎯 你正在练习：在餐厅/高铁制止他人抽烟<br>
+        <span style="font-size:1.0rem;color:#ccc;">
+            今天的对手：{personality_avatar} <b>{personality_name}</b> — {personality_hook}
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
 
     # 对话区域：渲染历史消息
     chat_container = st.container()
@@ -196,6 +210,7 @@ def render_training():
                     history=st.session_state.messages[:-1],  # 不包含本条
                     round_number=st.session_state.round_number,
                     max_rounds=MAX_ROUNDS,
+                    personality=st.session_state.smoker_personality,
                 )
 
             # 3. 记录抽烟者回复（空回复兜底）
@@ -208,28 +223,43 @@ def render_training():
             })
             st.session_state.round_number += 1
 
-            # 4. 满5轮 → 生成复盘 → 直接跳到复盘页
+            # 4. 满5轮 → 生成复盘 → 先展示最后一轮，再跳转
             if st.session_state.round_number > MAX_ROUNDS:
                 _finish_training()
-                st.session_state.page = "review"
+                if not st.session_state._redirect_ready:
+                    st.session_state._redirect_ready = True
+                else:
+                    st.session_state._redirect_ready = False
+                    st.session_state.page = "review"
 
             st.rerun()
 
     # 底部状态栏
-    st.markdown(f"""
-    <div class="bottom-bar">
-        <span>第 {min(st.session_state.round_number, MAX_ROUNDS)}/{MAX_ROUNDS} 轮</span>
-    </div>
-    """, unsafe_allow_html=True)
+    training_done = st.session_state.round_number > MAX_ROUNDS and st.session_state.review is not None
 
-    # 结束训练按钮（至少对话1轮后才显示）
-    if len(st.session_state.messages) >= 2:
+    if training_done:
+        st.success("✅ 复盘已生成，点击下方按钮查看")
         col1, col2, col3 = st.columns([1, 1, 1])
         with col2:
-            if st.button("🏁 结束训练，查看复盘", use_container_width=True):
-                _finish_training()
+            if st.button("📊 查看复盘", use_container_width=True, type="primary"):
+                st.session_state._redirect_ready = False
                 st.session_state.page = "review"
                 st.rerun()
+    else:
+        st.markdown(f"""
+        <div class="bottom-bar">
+            <span>第 {min(st.session_state.round_number, MAX_ROUNDS)}/{MAX_ROUNDS} 轮</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 结束训练按钮（至少对话1轮后才显示）
+        if len(st.session_state.messages) >= 2:
+            col1, col2, col3 = st.columns([1, 1, 1])
+            with col2:
+                if st.button("🏁 结束训练，查看复盘", use_container_width=True):
+                    _finish_training()
+                    st.session_state.page = "review"
+                    st.rerun()
 
 
 

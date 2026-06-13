@@ -26,6 +26,7 @@ print(f"用户说: 这里不能抽烟，请你灭掉。")
 print(f"抽烟者: {result1.get('reply')}")
 print(f"阻力等级: {result1.get('resistance_level')}")
 print(f"是否软化: {result1.get('should_soften')}")
+print(f"训练信号: {result1.get('coach_signal')}")
 
 # 模拟：用户表达不舒服（带历史）
 print("\n--- 第二轮 ---")
@@ -42,6 +43,7 @@ print(f"用户说: 我闻到烟味真的很难受，你能不能不抽了？")
 print(f"抽烟者: {result2.get('reply')}")
 print(f"阻力等级: {result2.get('resistance_level')}")
 print(f"是否软化: {result2.get('should_soften')}")
+print(f"训练信号: {result2.get('coach_signal')}")
 
 # 测试2: 复盘 Agent
 print("\n\n[测试2] 非暴力沟通复盘 Agent")
@@ -50,11 +52,11 @@ print("-" * 40)
 # 构建完整对话记录
 conversation = [
     {"role": "user", "content": "那个……不好意思……这里好像不能抽烟……"},
-    {"role": "smoker", "content": "关你什么事？我就吸一根。"},
+    {"role": "smoker", "content": "关你什么事？我就吸一根。", "resistance_level": 3, "coach_signal": "用户表达偏弱，可练习更明确"},
     {"role": "user", "content": "这里是公共场所，有规定的。"},
-    {"role": "smoker", "content": "又没人管，你操什么心？"},
+    {"role": "smoker", "content": "又没人管，你操什么心？", "resistance_level": 2, "coach_signal": "用户主要在讲规则"},
     {"role": "user", "content": "我闻到烟味真的不舒服，请你灭掉。"},
-    {"role": "smoker", "content": "……行，我灭了。"},
+    {"role": "smoker", "content": "……行，我灭了。", "resistance_level": 0, "coach_signal": "用户表达了感受和明确请求"},
 ]
 
 review = get_review(conversation)

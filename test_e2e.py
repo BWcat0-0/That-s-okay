@@ -39,13 +39,21 @@ for i, user_msg in enumerate(user_messages):
     reply = result["reply"]
     resistance = result["resistance_level"]
     soften = result["should_soften"]
+    coach_signal = result["coach_signal"]
 
     print(f"🚬 抽烟者: {reply}")
     print(f"   阻力={resistance} 软化={soften}")
+    print(f"   训练信号={coach_signal}")
 
     # 保存对话
     messages.append({"role": "user", "content": user_msg})
-    messages.append({"role": "smoker", "content": reply})
+    messages.append({
+        "role": "smoker",
+        "content": reply,
+        "resistance_level": resistance,
+        "should_soften": soften,
+        "coach_signal": coach_signal,
+    })
 
 # 模拟结束训练 → 复盘
 print(f"\n{'=' * 60}")

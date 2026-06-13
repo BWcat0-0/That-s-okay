@@ -47,6 +47,13 @@ try:
     # 测试结束判断逻辑（不调 LLM）
     assert should_end_conversation(5, 5) is True
     assert should_end_conversation(2, 5) is False
+    sample_messages = [
+        {"role": "user", "content": "我闻到烟味不舒服，请你灭掉。"},
+        {"role": "smoker", "content": "行吧，我注意点。", "resistance_level": 1},
+        {"role": "user", "content": "请你现在灭掉。"},
+        {"role": "smoker", "content": "好，我灭了。", "resistance_level": 0},
+    ]
+    assert should_end_conversation(2, 5, sample_messages) is True
     print(f"     should_end_conversation 逻辑正常")
 except Exception as e:
     print(f"  ❌ 失败: {e}")

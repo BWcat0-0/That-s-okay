@@ -9,11 +9,18 @@ import random
 import re
 from datetime import datetime
 from pathlib import Path
-from utils.config import get_llm_client, get_model_name
+from openai import APIError, AuthenticationError
+from utils.config import get_config, get_llm_client, get_model_name
 
 # Prompt 文件路径
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 DEBUG_LOG = Path(__file__).parent.parent / "debug_llm_output.log"
+
+
+def _has_valid_api_key() -> bool:
+    """判断是否配置了看起来可用的 API key。"""
+    api_key = get_config().get("api_key", "").strip()
+    return bool(api_key and api_key != "your-api-key-here")
 
 
 def _load_prompt(filename: str) -> str:
@@ -214,6 +221,81 @@ def _extract_reply_fallback(raw_text: str) -> str:
     return raw_text.strip()[:150]
 
 
+def _infer_coach_signal(user_message: str, result: dict) -> str:
+    """LLM 未返回 coach_signal 时，用轻量规则补一条训练信号。"""
+    text = user_message.strip()
+    resistance = result.get("resistance_level", 2)
+
+    attack_words = ("有病", "滚", "傻", "贱", "垃圾", "闭嘴")
+    feeling_words = ("不舒服", "难受", "呛", "受不了", "闻到", "影响我")
+    request_words = ("请", "麻烦", "能不能", "可以", "灭掉", "别抽", "不要抽")
+    rule_words = ("不能", "禁止", "规定", "公共场所", "禁烟")
+    weak_words = ("不好意思", "那个", "好像", "是不是", "可以吗")
+
+    if any(word in text for word in attack_words):
+        return "用户开始攻击，需要引导回边界"
+    if any(word in text for word in feeling_words) and any(word in text for word in request_words):
+        return "用户表达了感受和明确请求"
+    if any(word in text for word in feeling_words):
+        return "用户表达了真实感受"
+    if any(word in text for word in request_words) and any(word in text for word in rule_words):
+        return "用户讲了规则并提出请求"
+    if any(word in text for word in rule_words):
+        return "用户主要在讲规则"
+    if any(word in text for word in weak_words):
+        return "用户表达偏弱，可练习更明确"
+    if resistance <= 1:
+        return "用户表达较稳，对方开始松动"
+    return "用户已开口表达边界"
+
+
+def _build_offline_smoker_reply(
+    user_message: str,
+    round_number: int,
+    personality: dict,
+) -> dict:
+    """API 不可用时的本地规则兜底，保证 demo 闭环可跑。"""
+    coach_signal = _infer_coach_signal(user_message, {"resistance_level": 2})
+    phrases = personality.get("phrases", {})
+
+    if "攻击" in coach_signal:
+        bucket = "soften"
+        resistance = 1
+        should_soften = True
+    elif "感受和明确请求" in coach_signal:
+        bucket = "concede" if round_number >= 2 else "soften"
+        resistance = 0 if round_number >= 2 else 1
+        should_soften = True
+    elif "真实感受" in coach_signal:
+        bucket = "soften"
+        resistance = 1
+        should_soften = True
+    elif "规则" in coach_signal:
+        bucket = "deflect"
+        resistance = 2
+        should_soften = False
+    elif "偏弱" in coach_signal:
+        bucket = "pressure"
+        resistance = 3
+        should_soften = False
+    else:
+        bucket = "deflect"
+        resistance = 2
+        should_soften = False
+
+    options = phrases.get(bucket) or phrases.get("deflect") or ["我就抽一根，很快就完了。"]
+    reply = options[(round_number - 1) % len(options)]
+
+    return {
+        "reply": reply,
+        "resistance_level": resistance,
+        "should_soften": should_soften,
+        "coach_signal": coach_signal,
+        "personality_id": personality["id"],
+        "offline_fallback": True,
+    }
+
+
 def _call_llm(client, model: str, messages: list[dict], max_tokens: int = 500) -> str:
     """调用 LLM 并返回原始文本"""
     response = client.chat.completions.create(
@@ -242,6 +324,9 @@ def get_smoker_reply(
     if personality is None:
         personality = select_personality()
 
+    if not _has_valid_api_key():
+        return _build_offline_smoker_reply(user_message, round_number, personality)
+
     system_prompt = _build_system_prompt(personality)
 
     # 构建消息列表（不含最终用户输入，方便重试复用）
@@ -256,7 +341,17 @@ def get_smoker_reply(
 
     # 第一次调用
     messages = base_messages + [{"role": "user", "content": user_msg_content}]
-    raw_text = _call_llm(client, model, messages, max_tokens=500)
+    try:
+        raw_text = _call_llm(client, model, messages, max_tokens=500)
+    except (AuthenticationError, APIError, Exception) as exc:
+        _log_debug(
+            f"LLM CALL FAILED, USING OFFLINE FALLBACK\n"
+            f"PERSONALITY: {personality['name']} ({personality['id']})\n"
+            f"ROUND: {round_number}/{max_rounds}\n"
+            f"USER: {user_message}\n"
+            f"ERROR: {type(exc).__name__}: {exc}"
+        )
+        return _build_offline_smoker_reply(user_message, round_number, personality)
     result = _parse_json_reply(raw_text)
 
     # 重试：解析失败时，让 LLM 修正自己的输出
@@ -294,7 +389,17 @@ def get_smoker_reply(
             {"role": "user", "content": correction_prompt},
         ]
 
-        retry_text = _call_llm(client, model, correction_messages, max_tokens=200)
+        try:
+            retry_text = _call_llm(client, model, correction_messages, max_tokens=200)
+        except (AuthenticationError, APIError, Exception) as exc:
+            _log_debug(
+                f"LLM RETRY FAILED, USING OFFLINE FALLBACK\n"
+                f"PERSONALITY: {personality['name']} ({personality['id']})\n"
+                f"ROUND: {round_number}/{max_rounds}\n"
+                f"USER: {user_message}\n"
+                f"ERROR: {type(exc).__name__}: {exc}"
+            )
+            return _build_offline_smoker_reply(user_message, round_number, personality)
         result = _parse_json_reply(retry_text)
 
         if result is not None:
@@ -310,17 +415,56 @@ def get_smoker_reply(
                 "reply": fallback_reply,
                 "resistance_level": 2,
                 "should_soften": False,
+                "coach_signal": _infer_coach_signal(user_message, {"resistance_level": 2}),
             }
 
     # 确保必要字段存在
     result.setdefault("reply", "……")
     result.setdefault("resistance_level", 2)
     result.setdefault("should_soften", False)
+    result.setdefault("coach_signal", _infer_coach_signal(user_message, result))
     result["personality_id"] = personality["id"]
 
     return result
 
 
-def should_end_conversation(round_number: int, max_rounds: int = 5) -> bool:
-    """判断对话是否应该结束"""
-    return round_number >= max_rounds
+def should_end_conversation(
+    round_number: int,
+    max_rounds: int = 5,
+    messages: list[dict] | None = None,
+) -> bool:
+    """
+    判断对话是否应该结束。
+
+    规则优先满足黑客松 P0：最多 max_rounds 轮。
+    如果已经出现明确请求且对方阻力降到 0-1，也可以提前结束。
+    """
+    if round_number >= max_rounds:
+        return True
+
+    if not messages:
+        return False
+
+    smoker_messages = [msg for msg in messages if msg.get("role") == "smoker"]
+    user_messages = [msg for msg in messages if msg.get("role") == "user"]
+    if len(smoker_messages) < 2 or len(user_messages) < 2:
+        return False
+
+    last_smoker = smoker_messages[-1]
+    last_two_smokers = smoker_messages[-2:]
+    last_two_users = user_messages[-2:]
+
+    low_resistance = all(
+        msg.get("resistance_level", 2) <= 1
+        for msg in last_two_smokers
+    )
+    clear_boundary = any(
+        any(word in msg.get("content", "") for word in ("请", "灭掉", "别抽", "不要抽", "不舒服", "难受"))
+        for msg in last_two_users
+    )
+    conceded = last_smoker.get("resistance_level", 2) == 0 or any(
+        word in last_smoker.get("content", "")
+        for word in ("灭了", "不抽了", "掐了", "好吧", "行")
+    )
+
+    return low_resistance and clear_boundary and conceded

@@ -8,10 +8,17 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from utils.config import get_llm_client, get_model_name
+from openai import APIError, AuthenticationError
+from utils.config import get_config, get_llm_client, get_model_name
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 DEBUG_LOG = Path(__file__).parent.parent / "debug_review_output.log"
+
+
+def _has_valid_api_key() -> bool:
+    """判断是否配置了看起来可用的 API key。"""
+    api_key = get_config().get("api_key", "").strip()
+    return bool(api_key and api_key != "your-api-key-here")
 
 
 def _load_prompt(filename: str) -> str:
@@ -66,16 +73,15 @@ def _parse_json_reply(raw_text: str) -> dict | None:
 
     # 修复中文引号：在 JSON 字符串值内部，将 "xxx" 替换为 「xxx」
     # 匹配 "key": "value 包含 "inner" 引号" 这种模式
-    if result is None:
-        try:
-            fixed = re.sub(
-                r'(:\s*"[^"]*?)"([^"]*?)"([^"]*?")',
-                r'\1「\2」\3',
-                cleaned,
-            )
-            return json.loads(fixed)
-        except (json.JSONDecodeError, Exception):
-            pass
+    try:
+        fixed = re.sub(
+            r'(:\s*"[^"]*?)"([^"]*?)"([^"]*?")',
+            r'\1「\2」\3',
+            cleaned,
+        )
+        return json.loads(fixed)
+    except (json.JSONDecodeError, Exception):
+        pass
 
     return None
 
@@ -99,6 +105,9 @@ def get_review(
     对完整对话进行复盘分析，输出 3 条复盘内容。
     JSON 解析失败时自动重试一次。
     """
+    if not _has_valid_api_key():
+        return _get_fallback_review(conversation)
+
     client = get_llm_client()
     model = get_model_name()
 
@@ -110,12 +119,19 @@ def get_review(
         if msg["role"] == "user":
             conversation_text += f"第{i}轮 - 用户：{msg['content']}\n"
         elif msg["role"] == "smoker":
-            conversation_text += f"第{i}轮 - 抽烟者：{msg['content']}\n"
+            metadata = []
+            if "resistance_level" in msg:
+                metadata.append(f"阻力={msg['resistance_level']}")
+            if msg.get("coach_signal"):
+                metadata.append(f"训练信号={msg['coach_signal']}")
+            metadata_text = f"（{'；'.join(metadata)}）" if metadata else ""
+            conversation_text += f"第{i}轮 - 抽烟者{metadata_text}：{msg['content']}\n"
 
     user_prompt = f"""请对以下对话进行复盘分析：
 
 场景：{scenario}
 用户目标：练习表达边界，对公共场所抽烟者表达"我不舒服，请你灭掉"
+复盘语气：像朋友递一句具体反馈，不要像老师打分。避免"对话僵住了"、"真实的边界"、"你还没..."这类审判感表达。
 
 完整对话记录：
 {conversation_text}
@@ -123,55 +139,82 @@ def get_review(
 请按照系统提示词中的 JSON 格式输出 3 条复盘内容。"""
 
     # 第一次调用
-    raw_text = _call_llm(client, model, [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ])
+    try:
+        raw_text = _call_llm(client, model, [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
+    except (AuthenticationError, APIError, Exception) as exc:
+        _log_debug(f"REVIEW LLM CALL FAILED, USING FALLBACK\nERROR: {type(exc).__name__}: {exc}")
+        return _get_fallback_review(conversation)
     result = _parse_json_reply(raw_text)
 
     # 重试
     if result is None:
         _log_debug(f"RAW (1st attempt):\n{raw_text}")
 
-        retry_text = _call_llm(client, model, [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": raw_text},
-            {"role": "user", "content": (
-                "你上面的回复不是合法的 JSON 格式。"
-                "请重新输出，必须严格遵守以下要求：\n"
-                "1. 只输出一个完整的 JSON 对象\n"
-                "2. 不要用 ``` 代码块包裹\n"
-                "3. 三个字段 turning_point、better_response、boundary_template 都必须有内容\n\n"
-                "正确格式示例：\n"
-                '{"turning_point": "你第三轮说...", '
-                '"better_response": "这里不能抽烟，请你灭掉。", '
-                '"boundary_template": "这里禁止吸烟，我闻到不舒服，请你灭掉。"}'
-            )},
-        ], max_tokens=1200)
+        try:
+            retry_text = _call_llm(client, model, [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+                {"role": "assistant", "content": raw_text},
+                {"role": "user", "content": (
+                    "你上面的回复不是合法的 JSON 格式。"
+                    "请重新输出，必须严格遵守以下要求：\n"
+                    "1. 只输出一个完整的 JSON 对象\n"
+                    "2. 不要用 ``` 代码块包裹\n"
+                    "3. 三个字段 turning_point、better_response、boundary_template 都必须有内容\n\n"
+                    "正确格式示例：\n"
+                    '{"turning_point": "你第三轮说...", '
+                    '"better_response": "这里不能抽烟，请你灭掉。", '
+                    '"boundary_template": "这里禁止吸烟，我闻到不舒服，请你灭掉。"}'
+                )},
+            ], max_tokens=1200)
+        except (AuthenticationError, APIError, Exception) as exc:
+            _log_debug(f"REVIEW LLM RETRY FAILED, USING FALLBACK\nERROR: {type(exc).__name__}: {exc}")
+            return _get_fallback_review(conversation)
 
         result = _parse_json_reply(retry_text)
         if result is not None:
             _log_debug(f"RETRY SUCCESS:\n{retry_text}")
         else:
             _log_debug(f"RETRY FAILED:\n{retry_text}")
-            result = _get_fallback_review()
+            result = _get_fallback_review(conversation)
 
     # 确保必要字段存在
-    result.setdefault("turning_point", _get_fallback_review()["turning_point"])
-    result.setdefault("better_response", _get_fallback_review()["better_response"])
-    result.setdefault("boundary_template", _get_fallback_review()["boundary_template"])
+    fallback = _get_fallback_review(conversation)
+    result.setdefault("turning_point", fallback["turning_point"])
+    result.setdefault("better_response", fallback["better_response"])
+    result.setdefault("boundary_template", fallback["boundary_template"])
 
     return result
 
 
-def _get_fallback_review() -> dict:
+def _get_fallback_review(conversation: list[dict] | None = None) -> dict:
     """当 LLM 解析失败时的兜底复盘"""
+    user_messages = [
+        msg.get("content", "")
+        for msg in (conversation or [])
+        if msg.get("role") == "user"
+    ]
+    first = user_messages[0] if user_messages else "这里不能抽烟"
+    last = user_messages[-1] if user_messages else "请你把烟灭掉"
+
+    direct_words = ("有病", "滚", "傻", "贱", "垃圾", "毛病")
+    had_attack = any(any(word in msg for word in direct_words) for msg in user_messages)
+    if had_attack:
+        turning_point = (
+            f"你开头已经敢说「{first[:18]}」。后面有点跑到指责上了，"
+            "如果把重点收回到烟味和请求，对方更难转移话题。"
+        )
+    else:
+        turning_point = (
+            f"你开头说到「{first[:18]}」时已经把话题摆出来了。"
+            f"后面这句「{last[:18]}」更接近可执行请求，可以再短一点。"
+        )
+
     return {
-        "turning_point": (
-            "你今天开口表达了，无论语气如何，这都是为自己发声的一步。"
-            "每一次开口都是在练习边界的肌肉。"
-        ),
-        "better_response": "这里不能抽烟，请你灭掉。",
+        "turning_point": turning_point,
+        "better_response": "这里烟味让我不舒服，请灭掉。",
         "boundary_template": "这里禁止吸烟，我闻到烟味不舒服，请你把烟灭掉。",
     }

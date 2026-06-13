@@ -76,7 +76,8 @@
 {
   "reply": "你的回复内容（1-2句话，中文口语）",
   "resistance_level": 2,
-  "should_soften": false
+  "should_soften": false,
+  "coach_signal": "用户表达了规则，但还没表达个人感受"
 }
 ```
 
@@ -84,3 +85,4 @@
 - `reply`: 你要对用户说的话（只有这句会显示给用户）
 - `resistance_level`: 本轮阻力等级，0=完全让步，1=轻微抵抗，2=正常狡辩，3=较强施压
 - `should_soften`: 下一轮是否应该降低阻力（用户表达了感受则设为 true）
+- `coach_signal`: 给系统内部看的简短判断，说明用户本轮表达属于哪类以及下一步训练重点。不要超过25字

@@ -4,7 +4,7 @@
 """
 
 import streamlit as st
-from services.llm import get_smoker_reply, select_personality
+from services.llm import get_smoker_reply, select_personality, should_end_conversation
 from services.review import get_review
 
 # ============================================================
@@ -54,6 +54,22 @@ SCENARIO = "公共场所制止抽烟"
 def inject_css():
     st.markdown("""
     <style>
+        :root {
+            --camp-card-bg: #f6f6f8;
+            --camp-card-border: #d7d8df;
+            --camp-text: #31333f;
+            --camp-muted: #606575;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --camp-card-bg: #1e1e1e;
+                --camp-card-border: #3a3a3a;
+                --camp-text: #f5f5f5;
+                --camp-muted: #b7b7b7;
+            }
+        }
+
         /* 首页大标题 */
         .home-title {
             text-align: center;
@@ -65,18 +81,19 @@ def inject_css():
         .home-subtitle {
             text-align: center;
             font-size: 1.1rem;
-            color: #888;
+            color: var(--camp-muted);
             margin-bottom: 2rem;
         }
 
         /* 场景卡片 */
         .scenario-card {
-            background: #1e1e1e;
-            border: 1px solid #333;
+            background: var(--camp-card-bg);
+            border: 1px solid var(--camp-card-border);
             border-radius: 12px;
             padding: 1.5rem;
             text-align: center;
             margin-bottom: 1.5rem;
+            color: var(--camp-text);
         }
         .scenario-card .icon {
             font-size: 3rem;
@@ -89,28 +106,35 @@ def inject_css():
 
         /* 复盘卡片 */
         .review-card {
-            background: #1e1e1e;
-            border: 1px solid #333;
+            background: var(--camp-card-bg);
+            border: 1px solid var(--camp-card-border);
             border-radius: 12px;
             padding: 1.5rem;
             margin-bottom: 1rem;
+            color: var(--camp-text);
         }
         .review-card .card-title {
             font-size: 0.9rem;
-            color: #aaa;
+            color: var(--camp-muted);
             margin-bottom: 0.5rem;
+            font-weight: 650;
         }
         .review-card .card-body {
             font-size: 1.05rem;
             line-height: 1.6;
+            color: var(--camp-text);
         }
 
         /* 训练页顶部提示 */
         .training-hint {
             text-align: center;
-            color: #888;
+            color: var(--camp-muted);
             font-size: 0.9rem;
             margin-bottom: 1rem;
+        }
+        .training-hint .opponent-line {
+            font-size: 1.0rem;
+            color: var(--camp-text);
         }
 
         /* 底部状态栏 */
@@ -119,7 +143,7 @@ def inject_css():
             justify-content: space-between;
             align-items: center;
             font-size: 0.9rem;
-            color: #888;
+            color: var(--camp-muted);
             margin-top: 0.5rem;
         }
     </style>
@@ -141,7 +165,7 @@ def render_home():
     <div class="scenario-card">
         <div class="icon">🚭</div>
         <div class="label">公共场所制止抽烟</div>
-        <div style="color:#888;margin-top:0.5rem;">
+        <div style="color:var(--camp-muted);margin-top:0.5rem;">
             有人在餐厅/高铁抽烟，你要练习开口制止
         </div>
     </div>
@@ -172,7 +196,7 @@ def render_training():
     st.markdown(f"""
     <div class="training-hint">
         🎯 你正在练习：在餐厅/高铁制止他人抽烟<br>
-        <span style="font-size:1.0rem;color:#ccc;">
+        <span class="opponent-line">
             今天的对手：{personality_avatar} <b>{personality_name}</b> — {personality_hook}
         </span>
     </div>
@@ -189,8 +213,8 @@ def render_training():
                 with st.chat_message("assistant", avatar="🚬"):
                     st.write(msg["content"])
 
-    # 输入区域（满5轮后隐藏）
-    if st.session_state.round_number <= MAX_ROUNDS:
+    # 输入区域（训练结束后隐藏）
+    if st.session_state.round_number <= MAX_ROUNDS and st.session_state.review is None:
         user_input = st.chat_input(
             "在这里输入你想说的话...",
             key=f"input_round_{st.session_state.round_number}",
@@ -220,22 +244,31 @@ def render_training():
             st.session_state.messages.append({
                 "role": "smoker",
                 "content": reply_text,
+                "resistance_level": result.get("resistance_level", 2),
+                "should_soften": result.get("should_soften", False),
+                "coach_signal": result.get("coach_signal", ""),
             })
             st.session_state.round_number += 1
 
-            # 4. 满5轮 → 生成复盘 → 先展示最后一轮，再跳转
-            if st.session_state.round_number > MAX_ROUNDS:
+            should_finish = should_end_conversation(
+                round_number=st.session_state.round_number - 1,
+                max_rounds=MAX_ROUNDS,
+                messages=st.session_state.messages,
+            )
+
+            # 4. 满足结束条件 → 生成复盘 → 先展示最后一轮，再跳转
+            if should_finish:
                 _finish_training()
-                if not st.session_state._redirect_ready:
+                if st.session_state.round_number > MAX_ROUNDS and not st.session_state._redirect_ready:
                     st.session_state._redirect_ready = True
-                else:
+                elif st.session_state.round_number > MAX_ROUNDS:
                     st.session_state._redirect_ready = False
                     st.session_state.page = "review"
 
             st.rerun()
 
     # 底部状态栏
-    training_done = st.session_state.round_number > MAX_ROUNDS and st.session_state.review is not None
+    training_done = st.session_state.review is not None
 
     if training_done:
         st.success("✅ 复盘已生成，点击下方按钮查看")

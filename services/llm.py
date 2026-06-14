@@ -117,6 +117,8 @@ def _build_system_prompt(personality: dict) -> str:
     phrases_deflect = "\n".join(f"- {p}" for p in phrases["deflect"])
     phrases_soften = "\n".join(f"- {p}" for p in phrases["soften"])
     phrases_concede = "\n".join(f"- {p}" for p in phrases["concede"])
+    phrases_fake_comply = "\n".join(f"- {p}" for p in phrases.get("fake_comply", []))
+    phrases_counter_attack = "\n".join(f"- {p}" for p in phrases.get("counter_attack", []))
     catchphrases = "、".join(personality.get("catchphrases", []))
 
     replacements = {
@@ -128,6 +130,8 @@ def _build_system_prompt(personality: dict) -> str:
         "{{phrases_deflect}}": phrases_deflect,
         "{{phrases_soften}}": phrases_soften,
         "{{phrases_concede}}": phrases_concede,
+        "{{phrases_fake_comply}}": phrases_fake_comply,
+        "{{phrases_counter_attack}}": phrases_counter_attack,
         "{{catchphrases}}": catchphrases,
     }
 
@@ -258,8 +262,22 @@ def _build_offline_smoker_reply(
     coach_signal = _infer_coach_signal(user_message, {"resistance_level": 2})
     phrases = personality.get("phrases", {})
 
-    if "攻击" in coach_signal:
-        bucket = "soften"
+    # 第3轮以上，有一定概率用高阶策略（假意顺从 / 反咬态度）
+    if round_number >= 3 and "感受" not in coach_signal:
+        if round_number % 2 == 1 and phrases.get("fake_comply"):
+            bucket = "fake_comply"
+            resistance = 1
+            should_soften = False
+        elif phrases.get("counter_attack"):
+            bucket = "counter_attack"
+            resistance = 2
+            should_soften = False
+        else:
+            bucket = "soften"
+            resistance = 1
+            should_soften = True
+    elif "攻击" in coach_signal:
+        bucket = "counter_attack" if phrases.get("counter_attack") else "soften"
         resistance = 1
         should_soften = True
     elif "感受和明确请求" in coach_signal:

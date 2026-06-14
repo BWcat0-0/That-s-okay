@@ -5,6 +5,7 @@
 
 import streamlit as st
 from services.llm import get_smoker_reply, select_personality, should_end_conversation
+from services.parent_agent import get_parent_reply, select_parent_type, should_end_parent_conversation
 from services.review import get_review
 
 # ============================================================
@@ -26,7 +27,9 @@ def init_session():
         "messages": [],
         "round_number": 1,
         "review": None,
+        "scenario_type": None,          # "smoking" | "parent"
         "smoker_personality": None,
+        "parent_type": None,
         "_redirect_ready": False,
     }
     for key, value in defaults.items():
@@ -40,12 +43,15 @@ def reset_training():
     st.session_state.messages = []
     st.session_state.round_number = 1
     st.session_state.review = None
+    st.session_state.scenario_type = None
     st.session_state.smoker_personality = None
+    st.session_state.parent_type = None
     st.session_state._redirect_ready = False
 
 
-MAX_ROUNDS = 5
-SCENARIO = "公共场所制止抽烟"
+MAX_ROUNDS_SMOKING = 5
+MAX_ROUNDS_PARENT = 6
+SCENARIO_SMOKING = "公共场所制止抽烟"
 
 
 # ============================================================
@@ -160,26 +166,48 @@ def render_home():
         unsafe_allow_html=True,
     )
 
-    # 场景卡片
-    st.markdown("""
-    <div class="scenario-card">
-        <div class="icon">🚭</div>
-        <div class="label">公共场所制止抽烟</div>
-        <div style="color:var(--camp-muted);margin-top:0.5rem;">
-            有人在餐厅/高铁抽烟，你要练习开口制止
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # 场景选择
+    st.markdown("### 选择你要练习的场景")
+    col1, col2 = st.columns(2)
 
-    # 开始按钮
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if st.button("🚀 开始练习", type="primary", use_container_width=True):
+    with col1:
+        st.markdown("""
+        <div class="scenario-card">
+            <div class="icon">🚭</div>
+            <div class="label">公共场所制止抽烟</div>
+            <div style="color:var(--camp-muted);margin-top:0.5rem;">
+                对陌生人表达边界
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("🚬 开始抽烟场景", use_container_width=True):
+            st.session_state.scenario_type = "smoking"
             st.session_state.page = "training"
             st.session_state.messages = []
             st.session_state.round_number = 1
             st.session_state.review = None
             st.session_state.smoker_personality = select_personality()
+            st.session_state.parent_type = None
+            st.rerun()
+
+    with col2:
+        st.markdown("""
+        <div class="scenario-card">
+            <div class="icon">🏠</div>
+            <div class="label">向父母表达情绪</div>
+            <div style="color:var(--camp-muted);margin-top:0.5rem;">
+                对至亲表达脆弱和需求
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("💬 开始父母场景", use_container_width=True):
+            st.session_state.scenario_type = "parent"
+            st.session_state.page = "training"
+            st.session_state.messages = []
+            st.session_state.round_number = 1
+            st.session_state.review = None
+            st.session_state.parent_type = select_parent_type()
+            st.session_state.smoker_personality = None
             st.rerun()
 
 
@@ -187,7 +215,16 @@ def render_home():
 # 页面：训练页
 # ============================================================
 def render_training():
-    # 顶部提示（含人格信息）
+    scenario_type = st.session_state.scenario_type
+
+    if scenario_type == "parent":
+        _render_parent_training()
+    else:
+        _render_smoking_training()
+
+
+def _render_smoking_training():
+    """抽烟场景训练页"""
     personality = st.session_state.smoker_personality or {}
     personality_name = personality.get("name", "路人")
     personality_avatar = personality.get("avatar", "🚬")
@@ -202,42 +239,27 @@ def render_training():
     </div>
     """, unsafe_allow_html=True)
 
-    # 对话区域：渲染历史消息
-    chat_container = st.container()
-    with chat_container:
-        for msg in st.session_state.messages:
-            if msg["role"] == "user":
-                with st.chat_message("user", avatar="🙋"):
-                    st.write(msg["content"])
-            else:
-                with st.chat_message("assistant", avatar="🚬"):
-                    st.write(msg["content"])
+    _render_chat_history("smoker", "🚬")
 
-    # 输入区域（训练结束后隐藏）
-    if st.session_state.round_number <= MAX_ROUNDS and st.session_state.review is None:
+    max_rounds = MAX_ROUNDS_SMOKING
+    if st.session_state.round_number <= max_rounds and st.session_state.review is None:
         user_input = st.chat_input(
             "在这里输入你想说的话...",
             key=f"input_round_{st.session_state.round_number}",
         )
 
         if user_input:
-            # 1. 记录用户消息
-            st.session_state.messages.append({
-                "role": "user",
-                "content": user_input,
-            })
+            st.session_state.messages.append({"role": "user", "content": user_input})
 
-            # 2. 调用抽烟者 Agent（带加载提示）
             with st.spinner("💭 对方正在输入..."):
                 result = get_smoker_reply(
                     user_message=user_input,
-                    history=st.session_state.messages[:-1],  # 不包含本条
+                    history=st.session_state.messages[:-1],
                     round_number=st.session_state.round_number,
-                    max_rounds=MAX_ROUNDS,
+                    max_rounds=max_rounds,
                     personality=st.session_state.smoker_personality,
                 )
 
-            # 3. 记录抽烟者回复（空回复兜底）
             reply_text = result.get("reply", "").strip()
             if not reply_text:
                 reply_text = "……（对方没说话，瞪了你一眼）"
@@ -252,22 +274,109 @@ def render_training():
 
             should_finish = should_end_conversation(
                 round_number=st.session_state.round_number - 1,
-                max_rounds=MAX_ROUNDS,
+                max_rounds=max_rounds,
                 messages=st.session_state.messages,
             )
 
-            # 4. 满足结束条件 → 生成复盘 → 先展示最后一轮，再跳转
             if should_finish:
                 _finish_training()
-                if st.session_state.round_number > MAX_ROUNDS and not st.session_state._redirect_ready:
+                if st.session_state.round_number > max_rounds and not st.session_state._redirect_ready:
                     st.session_state._redirect_ready = True
-                elif st.session_state.round_number > MAX_ROUNDS:
+                elif st.session_state.round_number > max_rounds:
                     st.session_state._redirect_ready = False
                     st.session_state.page = "review"
 
             st.rerun()
 
-    # 底部状态栏
+    _render_bottom_bar(max_rounds)
+
+
+def _render_parent_training():
+    """父母场景训练页"""
+    parent_type = st.session_state.parent_type or {}
+    parent_name = parent_type.get("name", "父母")
+    parent_avatar = parent_type.get("avatar", "👨‍👩‍👧")
+    opening_hook = parent_type.get("opening_hook", "")
+
+    st.markdown(f"""
+    <div class="training-hint">
+        🎯 你正在练习：在被否定时完整表达自己的情绪<br>
+        <span class="opponent-line">
+            {parent_avatar} <b>{parent_name}</b> — {opening_hook}
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 第一轮显示场景开场白
+    if st.session_state.round_number == 1:
+        with st.chat_message("assistant", avatar=parent_avatar):
+            st.markdown(f"*{opening_hook}*")
+
+    _render_chat_history("parent", parent_avatar)
+
+    max_rounds = MAX_ROUNDS_PARENT
+    if st.session_state.round_number <= max_rounds and st.session_state.review is None:
+        user_input = st.chat_input(
+            "在这里输入你想对父母说的话...",
+            key=f"input_round_{st.session_state.round_number}",
+        )
+
+        if user_input:
+            st.session_state.messages.append({"role": "user", "content": user_input})
+
+            with st.spinner("💭 父母正在回应..."):
+                result = get_parent_reply(
+                    user_message=user_input,
+                    history=st.session_state.messages[:-1],
+                    round_number=st.session_state.round_number,
+                    max_rounds=max_rounds,
+                    parent_type=st.session_state.parent_type,
+                )
+
+            reply_text = result.get("reply", "").strip()
+            if not reply_text:
+                reply_text = "……（沉默，没有回应）"
+            st.session_state.messages.append({
+                "role": "parent",
+                "content": reply_text,
+                "resistance_level": result.get("resistance_level", 2),
+                "should_soften": result.get("should_soften", False),
+                "coach_signal": result.get("coach_signal", ""),
+            })
+            st.session_state.round_number += 1
+
+            should_finish = should_end_parent_conversation(
+                round_number=st.session_state.round_number - 1,
+                max_rounds=max_rounds,
+                messages=st.session_state.messages,
+            )
+
+            if should_finish:
+                _finish_training()
+                if st.session_state.round_number > max_rounds and not st.session_state._redirect_ready:
+                    st.session_state._redirect_ready = True
+                elif st.session_state.round_number > max_rounds:
+                    st.session_state._redirect_ready = False
+                    st.session_state.page = "review"
+
+            st.rerun()
+
+    _render_bottom_bar(max_rounds)
+
+
+def _render_chat_history(opponent_role: str, opponent_avatar: str):
+    """渲染对话历史"""
+    for msg in st.session_state.messages:
+        if msg["role"] == "user":
+            with st.chat_message("user", avatar="🙋"):
+                st.write(msg["content"])
+        elif msg["role"] == opponent_role:
+            with st.chat_message("assistant", avatar=opponent_avatar):
+                st.write(msg["content"])
+
+
+def _render_bottom_bar(max_rounds: int):
+    """渲染底部状态栏和结束按钮"""
     training_done = st.session_state.review is not None
 
     if training_done:
@@ -281,11 +390,10 @@ def render_training():
     else:
         st.markdown(f"""
         <div class="bottom-bar">
-            <span>第 {min(st.session_state.round_number, MAX_ROUNDS)}/{MAX_ROUNDS} 轮</span>
+            <span>第 {min(st.session_state.round_number, max_rounds)}/{max_rounds} 轮</span>
         </div>
         """, unsafe_allow_html=True)
 
-        # 结束训练按钮（至少对话1轮后才显示）
         if len(st.session_state.messages) >= 2:
             col1, col2, col3 = st.columns([1, 1, 1])
             with col2:
@@ -301,10 +409,22 @@ def _finish_training():
     if st.session_state.review is not None:
         return  # 已经生成过了
 
+    scenario_type = st.session_state.scenario_type
+    if scenario_type == "parent":
+        scenario_name = "向父母表达情绪"
+        opponent_label = "父母"
+        prompt_file = "parent_review_agent.md"
+    else:
+        scenario_name = SCENARIO_SMOKING
+        opponent_label = "抽烟者"
+        prompt_file = "review_agent.md"
+
     with st.spinner("🧠 正在分析你的表现..."):
         result = get_review(
             conversation=st.session_state.messages,
-            scenario=SCENARIO,
+            scenario=scenario_name,
+            opponent_label=opponent_label,
+            system_prompt_file=prompt_file,
         )
     st.session_state.review = result
 
@@ -350,8 +470,9 @@ def render_review():
 
     # 查看对话记录（可折叠）
     with st.expander("📜 查看对话记录"):
+        opponent_label = "🚬 抽烟者" if st.session_state.scenario_type == "smoking" else "👨‍👩‍👧 父母"
         for msg in st.session_state.messages:
-            role_label = "🙋 你" if msg["role"] == "user" else "🚬 抽烟者"
+            role_label = "🙋 你" if msg["role"] == "user" else opponent_label
             st.markdown(f"**{role_label}**：{msg['content']}")
 
     # 按钮
